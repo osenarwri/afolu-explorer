@@ -1,0 +1,39 @@
+{
+  "year": "2020",
+  "stocks": [
+    {
+      "key": "carbon_density_non_soil",
+      "label": "Non-soil carbon density",
+      "units": "Mg C / ha",
+      "group": "vegetation",
+      "geojson": "../../data/hex_outputs/carbon_density_non_soil_2020.geojson",
+      "stat": "mean"
+    }
+  ],
+  "fluxes": [
+    {
+      "key": "emissions_total",
+      "label": "Total emissions",
+      "units": "Mg CO2e / ha / yr",
+      "group": "emissions",
+      "geojson": "../../data/hex_outputs/lulucf_emissions_2020.geojson",
+      "stat": "mean"
+    },
+    {
+      "key": "removals_total",
+      "label": "Total removals",
+      "units": "Mg CO2e / ha / yr",
+      "group": "removals",
+      "geojson": "../../data/hex_outputs/lulucf_removals_2020.geojson",
+      "stat": "mean"
+    },
+    {
+      "key": "net_flux",
+      "label": "Net flux",
+      "units": "Mg CO2e / ha / yr",
+      "group": "net",
+      "geojson": "../../data/hex_outputs/lulucf_net_flux_2020.geojson",
+      "stat": "mean"
+    }
+  ]
+}

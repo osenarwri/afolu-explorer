@@ -1,0 +1,34 @@
+# ---- Dependencies ----
+node_modules/
+.pnp
+.pnp.*
+
+# ---- Next.js build output ----
+.next/
+out/
+build/
+*.tsbuildinfo
+next-env.d.ts
+
+# ---- Data (NOT committed — generate locally, see README) ----
+# Source rasters and GADM vector data (large, downloaded separately)
+data/rasters/
+data/gadm/
+# Generated outputs of the data pipeline
+data/hexes.csv
+app/public/data/
+
+# ---- Env / secrets ----
+.env*
+*.pem
+
+# ---- Editor / OS ----
+.DS_Store
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ---- Vercel ----
+.vercel

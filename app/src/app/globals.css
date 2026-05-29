@@ -1,0 +1,122 @@
+@import "tailwindcss";
+
+:root {
+  --color-purple: #7e3e9f;
+  --color-purple-deep: #6a3387;
+  --color-teal: #3fd9b4;
+  --color-teal-dim: rgba(63, 217, 180, 0.55);
+  --color-teal-faint: rgba(63, 217, 180, 0.18);
+  --color-pink: #ef6aa3;
+  --color-pink-dim: rgba(239, 106, 163, 0.6);
+  --color-pink-faint: rgba(239, 106, 163, 0.18);
+  --color-text: #ffffff;
+  --color-text-soft: rgba(255, 255, 255, 0.72);
+  --color-text-mute: rgba(255, 255, 255, 0.45);
+}
+
+@theme inline {
+  --color-purple: var(--color-purple);
+  --color-purple-deep: var(--color-purple-deep);
+  --color-teal: var(--color-teal);
+  --color-pink: var(--color-pink);
+  --font-sans: var(--font-sans);
+}
+
+html,
+body {
+  background: var(--color-purple);
+  color: var(--color-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue",
+    Helvetica, Arial, sans-serif;
+  font-feature-settings: "ss01", "tnum";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  height: 100%;
+}
+
+body {
+  min-height: 100vh;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Table / cards overlay: hold transparent briefly so the map markers' fly-out
+   animation is visible, then fade in to cover the map. */
+@keyframes viewFadeIn {
+  0% {
+    opacity: 0;
+  }
+  45% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.pill {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 1.1rem;
+  border: 1.5px solid var(--color-teal);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.pill:hover {
+  background: rgba(63, 217, 180, 0.12);
+}
+
+.pill[data-active="true"] {
+  background: var(--color-teal);
+  color: var(--color-purple-deep);
+  font-weight: 600;
+}
+
+.pill-group {
+  display: inline-flex;
+  border: 1.5px solid var(--color-teal);
+  border-radius: 999px;
+  padding: 4px;
+  gap: 4px;
+}
+
+/* Pills inside a group lose their own rounding by default — the outer
+   container defines the silhouette. We keep a small padding + gap so the
+   active highlight floats inside the outline rather than touching it. */
+.pill-group .pill {
+  border: none;
+  padding: 0.35rem 1rem;
+  border-radius: 0 !important;
+}
+
+/* First / last pills round their OUTER edge to match the outer container's
+   curve (just inset by the group padding). */
+.pill-group .pill:first-child {
+  border-radius: 999px 0 0 999px !important;
+}
+.pill-group .pill:last-child {
+  border-radius: 0 999px 999px 0 !important;
+}
+.pill-group .pill:first-child:last-child {
+  border-radius: 999px !important;
+}
+
+/* Hide scrollbars while keeping scroll behavior intact */
+.no-scrollbar {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge legacy */
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
