@@ -1,8 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { hexbin as d3Hexbin } from "d3-hexbin";
 import { scaleLinear, scaleSqrt } from "d3-scale";
+import { OrthographicView } from "@deck.gl/core";
+import { IconLayer } from "@deck.gl/layers";
 import type { Dataset, HexFeature } from "@/lib/schema";
 import type { AppState, ViewKind } from "@/lib/ui-state";
 import {
@@ -21,18 +24,40 @@ import { useTooltip, type PieceTooltip } from "@/lib/tooltip";
 import { Tooltip } from "../Tooltip";
 import { HexDetailBox } from "../HexDetailBox";
 
-// Unified component for Map, Chart (scatter/density) and Histogram. All hexes
-// are one persistent SVG path each, so switching views CSS-animates every dot
-// from one layout to the next.
+// Unified component for Map, Chart (scatter/density) and Histogram. Markers are
+// drawn by a single GPU deck.gl IconLayer (hexagon icon) whose position / size /
+// color are interpolated on the GPU when switching layouts; the SVG above only
+// draws the lightweight chrome (axes, ticks, density bins, labels).
+
+// deck.gl renders a WebGL canvas — load it client-side only.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const DeckGL = dynamic(() => import("@deck.gl/react").then((m) => m.default), {
+  ssr: false,
+}) as any;
 
 const PAD = { top: 48, right: 48, bottom: 48, left: 48 };
 const HEX_PATH = d3Hexbin<unknown>().radius(1).hexagon();
-const TRANSITION =
-  "transform 800ms cubic-bezier(0.22, 1, 0.36, 1), fill 600ms ease";
 export const DOT_MIN = 1.5;
 export const DOT_MAX = 5;
 const NUM_BINS = 22;
 const INTER_BAR_GAP_IN_PITCH = 2;
+const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
+
+// Parse a CSS color ("#rrggbb" or "rgb(r, g, b)") to an [r,g,b] byte triple.
+function cssToRGB(css: string): [number, number, number] {
+  if (css[0] === "#") {
+    const m = css.slice(1);
+    return [
+      parseInt(m.slice(0, 2), 16),
+      parseInt(m.slice(2, 4), 16),
+      parseInt(m.slice(4, 6), 16),
+    ];
+  }
+  const nums = css.match(/[\d.]+/g);
+  if (nums && nums.length >= 3)
+    return [Math.round(+nums[0]), Math.round(+nums[1]), Math.round(+nums[2])];
+  return [255, 255, 255];
+}
 
 interface Point {
   hex: HexFeature;
@@ -99,8 +124,6 @@ export function MapChartView({
 
   const isMap = layoutView === "map";
   const isDensity = layoutView === "scatter" && state.scatterMode === "density";
-  const isScatterChart =
-    layoutView === "scatter" && state.scatterMode === "scatter";
   const isHistogram = layoutView === "histogram";
 
   // Fly-in / fly-out: when active, markers settle to their real positions; when
@@ -652,6 +675,183 @@ export function MapChartView({
   const formatHistTick = (v: number) =>
     Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(1);
 
+  // ----- deck.gl marker layer -----
+  // Mount-gate so no GL/canvas work happens during SSR.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
+  // A white hexagon icon (the exact marker silhouette), tinted per-instance via
+  // getColor (mask). Drawn once onto a canvas atlas.
+  const iconAtlas = useMemo(() => {
+    if (typeof document === "undefined") return null;
+    const S = 64;
+    const c = document.createElement("canvas");
+    c.width = S;
+    c.height = S;
+    const ctx = c.getContext("2d");
+    if (!ctx) return null;
+    ctx.fillStyle = "#ffffff";
+    ctx.translate(S / 2, S / 2);
+    const rr = S / 2 - 2;
+    ctx.scale(rr, rr);
+    ctx.fill(new Path2D(HEX_PATH as string));
+    return c;
+  }, []);
+  const iconMapping = useMemo(
+    () => ({
+      hex: { x: 0, y: 0, width: 64, height: 64, anchorX: 32, anchorY: 32, mask: true },
+    }),
+    []
+  );
+
+  // Per-marker target position / radius / RGBA, recomputed per layout. deck.gl
+  // GPU-interpolates between successive versions of these (the transitions).
+  const visuals = useMemo(() => {
+    const n = points.length;
+    const targets: [number, number][] = new Array(n);
+    const radii: number[] = new Array(n);
+    const colors: [number, number, number, number][] = new Array(n);
+    const cxc = size.w / 2;
+    const cyc = size.h / 2;
+    const R = Math.hypot(size.w, size.h) / 2 + 140;
+    const histDotMaxR = Math.min(DOT_MAX, histogramPitch * 0.4);
+    const histDotMinR = Math.min(DOT_MIN, histDotMaxR);
+    const histSizeScale = scaleSqrt()
+      .domain([0, totalStocksMax || 1])
+      .range([histDotMinR, histDotMaxR]);
+    for (let i = 0; i < n; i++) {
+      const p = points[i];
+      const realTx = isMap ? p.mapX : isHistogram ? p.histX : p.chartX;
+      const realTy = isMap ? p.mapY : isHistogram ? p.histY : p.chartY;
+      let tx = realTx;
+      let ty = realTy;
+      if (parked) {
+        const dx = realTx - cxc;
+        const dy = realTy - cyc;
+        const len = Math.hypot(dx, dy) || 1;
+        tx = cxc + (dx / len) * R;
+        ty = cyc + (dy / len) * R;
+      }
+      targets[i] = [tx, ty];
+      radii[i] = isHistogram
+        ? histSizeScale(p.totalStocks)
+        : sizeScale(p.sizeValue);
+      const colorVal = isHistogram ? p.netFlux : p.colorValue;
+      const clips = isMap ? colorLayerClips : netFluxClips;
+      const effColorMode = isMap ? colorMode : "diverging";
+      const colorStr =
+        effColorMode !== "diverging"
+          ? fluxColorSided(colorVal, clips.posMax, effColorMode)
+          : fluxColorClipped(colorVal, clips.posMax, clips.negMax);
+      const [r, g, b] = cssToRGB(colorStr);
+      let hidden: boolean;
+      if (isHistogram) {
+        hidden = histogram.slotInBin[i] < 0;
+      } else {
+        const colorOk =
+          state.colorBins.length === 0 ||
+          state.colorBins.includes(
+            fluxColorBin(colorVal, clips.posMax, clips.negMax, effColorMode)
+          );
+        const sizeOk =
+          state.sizeBins.length === 0 ||
+          state.sizeBins.includes(sizeBin(p.sizeValue, sizeMax));
+        hidden = !(colorOk && sizeOk);
+      }
+      colors[i] = [r, g, b, hidden ? 0 : 230];
+    }
+    return { targets, radii, colors };
+  }, [
+    points,
+    parked,
+    size.w,
+    size.h,
+    isMap,
+    isHistogram,
+    histogramPitch,
+    totalStocksMax,
+    sizeScale,
+    colorLayerClips,
+    netFluxClips,
+    colorMode,
+    sizeMax,
+    histogram,
+    state.colorBins,
+    state.sizeBins,
+  ]);
+
+  const deckLayers = useMemo(() => {
+    if (!mounted || !iconAtlas) return [];
+    const { targets, radii, colors } = visuals;
+    return [
+      new IconLayer<HexFeature>({
+        id: "markers",
+        data: hexes,
+        // Runtime accepts a <canvas> atlas; the TS type only lists string|Texture.
+        iconAtlas: iconAtlas as unknown as string,
+        iconMapping,
+        getIcon: () => "hex",
+        sizeUnits: "pixels",
+        getPosition: (_d: HexFeature, info: { index: number }) =>
+          (targets[info.index] ?? [0, 0]) as [number, number],
+        getSize: (_d: HexFeature, info: { index: number }) =>
+          (radii[info.index] ?? 1) * 2,
+        getColor: (_d: HexFeature, info: { index: number }) =>
+          (colors[info.index] ?? [255, 255, 255, 0]) as [
+            number,
+            number,
+            number,
+            number
+          ],
+        visible: !isDensity,
+        pickable: !isDensity,
+        autoHighlight: true,
+        highlightColor: [255, 255, 255, 150],
+        transitions: {
+          getPosition: { duration: 800, easing: easeOutCubic },
+          getColor: { duration: 500, easing: easeOutCubic },
+          getSize: { duration: 600, easing: easeOutCubic },
+        },
+        updateTriggers: {
+          getPosition: targets,
+          getSize: radii,
+          getColor: colors,
+        },
+      }),
+    ];
+  }, [mounted, iconAtlas, iconMapping, visuals, hexes, isDensity]);
+
+  const deckViews = useMemo(
+    () => [new OrthographicView({ id: "ortho", flipY: true })],
+    []
+  );
+  const deckViewState = { target: [size.w / 2, size.h / 2, 0], zoom: 0 };
+
+  // deck.gl picking → reuse the existing tooltip + detail-box flow. Defined in
+  // render so they capture fresh `points` / `buildHover`.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleDeckHover = (info: any) => {
+    const idx = info?.index;
+    if (
+      idx != null &&
+      idx >= 0 &&
+      info.layer &&
+      visuals.colors[idx]?.[3] > 0 &&
+      info.srcEvent
+    ) {
+      tooltip.show(buildHover(points[idx]), info.srcEvent);
+    } else {
+      tooltip.hide();
+    }
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleDeckClick = (info: any) => {
+    const idx = info?.index;
+    if (idx != null && idx >= 0 && info.layer && visuals.colors[idx]?.[3] > 0) {
+      setSelectedHex(points[idx].hex);
+    }
+  };
+
   return (
     <div
       ref={containerRef}
@@ -660,11 +860,30 @@ export function MapChartView({
       onMouseMove={onHistMouseMove}
       onMouseLeave={onHistMouseLeave}
     >
+      {/* GPU marker layer (below the SVG chrome) */}
+      <DeckGL
+        style={{ position: "absolute", inset: 0 }}
+        width={size.w}
+        height={size.h}
+        views={deckViews}
+        viewState={deckViewState}
+        controller={false}
+        layers={deckLayers}
+        onHover={handleDeckHover}
+        onClick={handleDeckClick}
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        getCursor={({ isHovering }: any) => (isHovering ? "pointer" : "default")}
+      />
       <svg
         width={size.w}
         height={size.h}
         viewBox={`0 0 ${size.w} ${size.h}`}
-        style={{ display: "block" }}
+        style={{
+          display: "block",
+          position: "absolute",
+          inset: 0,
+          pointerEvents: "none",
+        }}
       >
         {/* Chart axis lines */}
         <g
@@ -819,96 +1038,6 @@ export function MapChartView({
                 onMouseEnter={(e) => tooltip.show(tipData, e)}
                 onMouseMove={(e) => tooltip.show(tipData, e)}
                 onMouseLeave={() => tooltip.hide()}
-              />
-            );
-          })}
-        </g>
-
-        {/* Individual hex dots */}
-        <g
-          style={{
-            opacity: isDensity ? 0 : 1,
-            transition: "opacity 400ms ease",
-            pointerEvents: isDensity ? "none" : "auto",
-          }}
-        >
-          {points.map((p, i) => {
-            const realTx = isMap ? p.mapX : isHistogram ? p.histX : p.chartX;
-            const realTy = isMap ? p.mapY : isHistogram ? p.histY : p.chartY;
-            // When parked, project the marker radially out past the viewport
-            // corner so it sits off-screen; the transform transition flies it
-            // in/out along that radius.
-            let tx = realTx;
-            let ty = realTy;
-            if (parked) {
-              const cxc = size.w / 2;
-              const cyc = size.h / 2;
-              const R = Math.hypot(size.w, size.h) / 2 + 140;
-              const dx = realTx - cxc;
-              const dy = realTy - cyc;
-              const len = Math.hypot(dx, dy) || 1;
-              tx = cxc + (dx / len) * R;
-              ty = cyc + (dy / len) * R;
-            }
-            const histDotMaxR = Math.min(DOT_MAX, histogramPitch * 0.4);
-            const histDotMinR = Math.min(DOT_MIN, histDotMaxR);
-            const r = isHistogram
-              ? scaleSqrt()
-                  .domain([0, totalStocksMax || 1])
-                  .range([histDotMinR, histDotMaxR])(p.totalStocks)
-              : sizeScale(p.sizeValue);
-            const colorVal = isHistogram ? p.netFlux : p.colorValue;
-            const clips = isMap ? colorLayerClips : netFluxClips;
-            const effColorMode = isMap ? colorMode : "diverging";
-            const color =
-              effColorMode !== "diverging"
-                ? fluxColorSided(colorVal, clips.posMax, effColorMode)
-                : fluxColorClipped(colorVal, clips.posMax, clips.negMax);
-            // Interactive legend filter (color + size). Histogram is re-packed
-            // upstream, so there a hidden dot is simply one with slot −1; map &
-            // scatter hide via opacity so freely-placed dots just fade out.
-            const sizeVal = p.sizeValue;
-            const colorOk =
-              state.colorBins.length === 0 ||
-              state.colorBins.includes(
-                fluxColorBin(colorVal, clips.posMax, clips.negMax, effColorMode)
-              );
-            const sizeOk =
-              state.sizeBins.length === 0 ||
-              state.sizeBins.includes(sizeBin(sizeVal, sizeMax));
-            const hiddenByLegend = isHistogram
-              ? histogram.slotInBin[i] < 0
-              : !(colorOk && sizeOk);
-            return (
-              <path
-                key={p.hex_id}
-                d={HEX_PATH}
-                fill={color}
-                fillOpacity={hiddenByLegend ? 0 : 0.9}
-                style={{
-                  transform: `translate(${tx}px, ${ty}px) scale(${r})`,
-                  transition: `${TRANSITION}, fill-opacity 300ms ease`,
-                  cursor: isMap || isScatterChart || isHistogram
-                    ? "pointer"
-                    : "default",
-                  pointerEvents: hiddenByLegend ? "none" : "auto",
-                }}
-                onMouseEnter={(e) => {
-                  tooltip.show(buildHover(p), e);
-                  const el = e.currentTarget;
-                  el.setAttribute("stroke", "#ffffff");
-                  el.setAttribute("stroke-width", String(2 / r));
-                }}
-                onMouseMove={(e) => tooltip.show(buildHover(p), e)}
-                onMouseLeave={(e) => {
-                  tooltip.hide();
-                  e.currentTarget.setAttribute("stroke", "none");
-                  e.currentTarget.setAttribute("stroke-width", "0");
-                }}
-                onClick={() => {
-                  if (isMap || isScatterChart || isHistogram)
-                    setSelectedHex(p.hex);
-                }}
               />
             );
           })}
