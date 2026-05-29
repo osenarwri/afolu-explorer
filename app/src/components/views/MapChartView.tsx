@@ -127,16 +127,28 @@ export function MapChartView({
   const isHistogram = layoutView === "histogram";
 
   // Fly-in / fly-out: when active, markers settle to their real positions; when
-  // inactive they park on a circle outside the viewport. Toggling `parked`
-  // makes the CSS transform transition carry them in/out.
+  // inactive they park on a circle outside the viewport. The deck.gl transition
+  // carries them in/out. `deckReady` (set on the deck canvas's onLoad) gates the
+  // first un-park so the parked frame is actually rendered before we animate —
+  // otherwise on a cold landing the deck chunk loads after the un-park and the
+  // markers just appear in place.
   const [parked, setParked] = useState(true);
+  const [deckReady, setDeckReady] = useState(false);
   useEffect(() => {
-    if (active) {
-      const id = requestAnimationFrame(() => setParked(false));
-      return () => cancelAnimationFrame(id);
+    if (!active) {
+      setParked(true);
+      return;
     }
-    setParked(true);
-  }, [active]);
+    if (!deckReady) return; // wait until deck has rendered the parked frame
+    let id2 = 0;
+    const id1 = requestAnimationFrame(() => {
+      id2 = requestAnimationFrame(() => setParked(false));
+    });
+    return () => {
+      cancelAnimationFrame(id1);
+      cancelAnimationFrame(id2);
+    };
+  }, [active, deckReady]);
 
   // Layer labels for the current selection
   const stocksLayerLabel = useMemo(() => {
@@ -832,14 +844,11 @@ export function MapChartView({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleDeckHover = (info: any) => {
     const idx = info?.index;
-    if (
-      idx != null &&
-      idx >= 0 &&
-      info.layer &&
-      visuals.colors[idx]?.[3] > 0 &&
-      info.srcEvent
-    ) {
-      tooltip.show(buildHover(points[idx]), info.srcEvent);
+    if (idx != null && idx >= 0 && info.layer && visuals.colors[idx]?.[3] > 0) {
+      const rect = containerRef.current?.getBoundingClientRect();
+      const clientX = (rect?.left ?? 0) + (info.x ?? 0);
+      const clientY = (rect?.top ?? 0) + (info.y ?? 0);
+      tooltip.show(buildHover(points[idx]), { clientX, clientY } as MouseEvent);
     } else {
       tooltip.hide();
     }
@@ -869,6 +878,7 @@ export function MapChartView({
         viewState={deckViewState}
         controller={false}
         layers={deckLayers}
+        onLoad={() => setDeckReady(true)}
         onHover={handleDeckHover}
         onClick={handleDeckClick}
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1099,8 +1109,6 @@ export function MapChartView({
           globalAbsMaxFluxComponent={globalAbsMaxFluxComponent}
           globalAbsMaxNet={fluxAbsMax}
           onClose={() => setSelectedHex(null)}
-          onPieceHover={tooltip.show}
-          onPieceLeave={tooltip.hide}
         />
       )}
     </div>

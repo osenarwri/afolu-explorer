@@ -40,7 +40,7 @@ export interface AppState {
 }
 
 export function useAppState(): AppState {
-  const [view, setViewRaw] = useState<ViewKind>("map");
+  const [view, setView] = useState<ViewKind>("map");
   const [stocksKey, setStocksKeyRaw] = useState<string>(STOCKS_TOTAL_KEY);
   const [fluxesKey, setFluxesKeyRaw] = useState<string>("net_flux");
   const [sort, setSort] = useState<SortKind>("stocks_total");
@@ -53,13 +53,8 @@ export function useAppState(): AppState {
   const [colorBins, setColorBins] = useState<number[]>([]);
   const [sizeBins, setSizeBins] = useState<number[]>([]);
 
-  // A legend selection only makes sense for the current view + the layer it
-  // bins, so clear the relevant selection whenever those change.
-  const setView = useCallback((v: ViewKind) => {
-    setViewRaw(v);
-    setColorBins([]);
-    setSizeBins([]);
-  }, []);
+  // A legend selection persists across the marker views (map/scatter/histogram)
+  // — only the bound layer changing should reset it.
   const setFluxesKey = useCallback((k: string) => {
     setFluxesKeyRaw(k);
     setColorBins([]);

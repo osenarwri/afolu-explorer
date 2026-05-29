@@ -1,9 +1,8 @@
 "use client";
 
-import { useCallback } from "react";
+import { useEffect, useState } from "react";
 import type { Dataset, HexFeature } from "@/lib/schema";
 import { fluxTotal, stocksTotal } from "@/lib/data";
-import type { PieceTooltip } from "@/lib/tooltip";
 import { StocksTotem } from "./totems/StocksTotem";
 import { FluxesTotem } from "./totems/FluxesTotem";
 
@@ -14,8 +13,6 @@ interface Props {
   globalAbsMaxFluxComponent: number;
   globalAbsMaxNet: number;
   onClose: () => void;
-  onPieceHover: (t: PieceTooltip, e: React.MouseEvent) => void;
-  onPieceLeave: () => void;
 }
 
 export function HexDetailBox({
@@ -25,8 +22,6 @@ export function HexDetailBox({
   globalAbsMaxFluxComponent,
   globalAbsMaxNet,
   onClose,
-  onPieceHover,
-  onPieceLeave,
 }: Props) {
   const stockTot = stocksTotal(hex, manifest.stocks);
   const fluxTot = fluxTotal(hex, manifest.fluxes);
@@ -34,16 +29,12 @@ export function HexDetailBox({
   const netLayer = manifest.fluxes.find((l) => l.group === "net");
   const fluxUnits = netLayer?.units ?? manifest.fluxes[0]?.units ?? "";
 
-  const enrichedHover = useCallback(
-    (t: PieceTooltip, e: React.MouseEvent) => {
-      const extras =
-        t.kind === "stock"
-          ? { totalStocks: stockTot, totalStocksUnits: stocksUnits }
-          : { netFlux: fluxTot, netFluxUnits: fluxUnits };
-      onPieceHover({ ...t, ...extras }, e);
-    },
-    [onPieceHover, stockTot, stocksUnits, fluxTot, fluxUnits]
-  );
+  // Grow the totems in when the box opens (same effect as the cards view).
+  const [animated, setAnimated] = useState(false);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setAnimated(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
 
   return (
     <div
@@ -186,8 +177,7 @@ export function HexDetailBox({
                 gapRatio={0.12}
                 strokeWidth={2}
                 cornerRadius={5}
-                onPieceHover={enrichedHover}
-                onPieceLeave={onPieceLeave}
+                animated={animated}
               />
             </div>
             <div>
@@ -230,8 +220,7 @@ export function HexDetailBox({
                 strokeWidth={2}
                 cornerRadius={5}
                 zeroAnchor="center"
-                onPieceHover={enrichedHover}
-                onPieceLeave={onPieceLeave}
+                animated={animated}
               />
             </div>
             <div>

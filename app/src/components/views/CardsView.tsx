@@ -268,8 +268,6 @@ export function CardsView({
           globalAbsMaxFluxComponent={globalAbsMaxFluxComponent}
           globalAbsMaxNet={globalAbsMaxNet}
           onClose={() => setSelectedHex(null)}
-          onPieceHover={tooltip.show}
-          onPieceLeave={tooltip.hide}
         />
       )}
     </div>
