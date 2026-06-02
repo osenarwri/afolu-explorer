@@ -41,6 +41,10 @@ export const DOT_MIN = 1.5;
 export const DOT_MAX = 5;
 const NUM_BINS = 22;
 const INTER_BAR_GAP_IN_PITCH = 2;
+// Entry animation (landing / non-marker → marker view):
+const GROW_DURATION = 800; // ms per marker grow from 0 → real size
+const STAGGER_SPAN = 600; // ms total stagger between largest and smallest start
+const COLOR_REVEAL_DURATION = 500; // ms white → real color, once grow finishes
 const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
 
 // Parse a CSS color ("#rrggbb" or "rgb(r, g, b)") to an [r,g,b] byte triple.
@@ -126,29 +130,55 @@ export function MapChartView({
   const isDensity = layoutView === "scatter" && state.scatterMode === "density";
   const isHistogram = layoutView === "histogram";
 
-  // Fly-in / fly-out: when active, markers settle to their real positions; when
-  // inactive they park on a circle outside the viewport. The deck.gl transition
-  // carries them in/out. `deckReady` (set on the deck canvas's onLoad) gates the
-  // first un-park so the parked frame is actually rendered before we animate —
-  // otherwise on a cold landing the deck chunk loads after the un-park and the
-  // markers just appear in place.
-  const [parked, setParked] = useState(true);
+  // Entry animation (idle → grow → color-reveal → active) on landing or when
+  // returning from a non-marker view. Markers GROW IN PLACE from size 0 (largest
+  // first, staggered), held at the divergent-center white during the grow, then
+  // ALL transition to their real colors at once. Going active → inactive still
+  // uses the parked-circle fly-out (the deck.gl getPosition transition handles
+  // it). Going marker → marker stays on deck's default transitions.
+  // `deckReady` gates the first entry until the deck canvas is mounted.
+  type Phase = "idle" | "entering-grow" | "entering-color" | "active" | "parked";
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [entryProgress, setEntryProgress] = useState(0);
   const [deckReady, setDeckReady] = useState(false);
+
+  // Drive phase off (active, deckReady). Going inactive parks the markers;
+  // going active (with deck ready) re-starts the entry animation.
   useEffect(() => {
     if (!active) {
-      setParked(true);
+      if (phase !== "parked" && phase !== "idle") setPhase("parked");
       return;
     }
-    if (!deckReady) return; // wait until deck has rendered the parked frame
-    let id2 = 0;
-    const id1 = requestAnimationFrame(() => {
-      id2 = requestAnimationFrame(() => setParked(false));
-    });
-    return () => {
-      cancelAnimationFrame(id1);
-      cancelAnimationFrame(id2);
-    };
-  }, [active, deckReady]);
+    if (!deckReady) return;
+    if (phase === "idle" || phase === "parked") {
+      setEntryProgress(0);
+      setPhase("entering-grow");
+    }
+  }, [active, deckReady, phase]);
+
+  // Entry sub-phases: rAF the grow, then a fixed delay for the color reveal.
+  useEffect(() => {
+    if (phase === "entering-grow") {
+      const start = performance.now();
+      let raf = 0;
+      const tick = (now: number) => {
+        const elapsed = now - start;
+        const p = Math.min(1, elapsed / (STAGGER_SPAN + GROW_DURATION));
+        setEntryProgress(p);
+        if (p < 1) raf = requestAnimationFrame(tick);
+        else setPhase("entering-color");
+      };
+      raf = requestAnimationFrame(tick);
+      return () => cancelAnimationFrame(raf);
+    }
+    if (phase === "entering-color") {
+      const id = window.setTimeout(
+        () => setPhase("active"),
+        COLOR_REVEAL_DURATION
+      );
+      return () => window.clearTimeout(id);
+    }
+  }, [phase]);
 
   // Layer labels for the current selection
   const stocksLayerLabel = useMemo(() => {
@@ -716,13 +746,16 @@ export function MapChartView({
     []
   );
 
-  // Per-marker target position / radius / RGBA, recomputed per layout. deck.gl
-  // GPU-interpolates between successive versions of these (the transitions).
-  const visuals = useMemo(() => {
+  // Per-marker REAL targets / radii / colors for the current layout (no phase
+  // overrides). Plus parked-circle targets used for the fly-out. The
+  // phase-dependent `visuals` below picks among these and applies the entry
+  // animation overrides.
+  const baseVisuals = useMemo(() => {
     const n = points.length;
-    const targets: [number, number][] = new Array(n);
-    const radii: number[] = new Array(n);
-    const colors: [number, number, number, number][] = new Array(n);
+    const realTargets: [number, number][] = new Array(n);
+    const parkedTargets: [number, number][] = new Array(n);
+    const realRadii: number[] = new Array(n);
+    const realColors: [number, number, number, number][] = new Array(n);
     const cxc = size.w / 2;
     const cyc = size.h / 2;
     const R = Math.hypot(size.w, size.h) / 2 + 140;
@@ -733,19 +766,14 @@ export function MapChartView({
       .range([histDotMinR, histDotMaxR]);
     for (let i = 0; i < n; i++) {
       const p = points[i];
-      const realTx = isMap ? p.mapX : isHistogram ? p.histX : p.chartX;
-      const realTy = isMap ? p.mapY : isHistogram ? p.histY : p.chartY;
-      let tx = realTx;
-      let ty = realTy;
-      if (parked) {
-        const dx = realTx - cxc;
-        const dy = realTy - cyc;
-        const len = Math.hypot(dx, dy) || 1;
-        tx = cxc + (dx / len) * R;
-        ty = cyc + (dy / len) * R;
-      }
-      targets[i] = [tx, ty];
-      radii[i] = isHistogram
+      const tx = isMap ? p.mapX : isHistogram ? p.histX : p.chartX;
+      const ty = isMap ? p.mapY : isHistogram ? p.histY : p.chartY;
+      realTargets[i] = [tx, ty];
+      const dx = tx - cxc;
+      const dy = ty - cyc;
+      const len = Math.hypot(dx, dy) || 1;
+      parkedTargets[i] = [cxc + (dx / len) * R, cyc + (dy / len) * R];
+      realRadii[i] = isHistogram
         ? histSizeScale(p.totalStocks)
         : sizeScale(p.sizeValue);
       const colorVal = isHistogram ? p.netFlux : p.colorValue;
@@ -770,12 +798,11 @@ export function MapChartView({
           state.sizeBins.includes(sizeBin(p.sizeValue, sizeMax));
         hidden = !(colorOk && sizeOk);
       }
-      colors[i] = [r, g, b, hidden ? 0 : 230];
+      realColors[i] = [r, g, b, hidden ? 0 : 230];
     }
-    return { targets, radii, colors };
+    return { realTargets, parkedTargets, realRadii, realColors };
   }, [
     points,
-    parked,
     size.w,
     size.h,
     isMap,
@@ -791,6 +818,83 @@ export function MapChartView({
     state.colorBins,
     state.sizeBins,
   ]);
+
+  // Rank markers by real radius (largest = rank 0). Used to stagger the entry
+  // grow animation so big markers start first.
+  const ranks = useMemo(() => {
+    const realRadii = baseVisuals.realRadii;
+    const n = realRadii.length;
+    const order = Array.from({ length: n }, (_, i) => i).sort(
+      (a, b) => realRadii[b] - realRadii[a]
+    );
+    const out: number[] = new Array(n);
+    for (let rank = 0; rank < n; rank++) out[order[rank]] = rank;
+    return out;
+  }, [baseVisuals.realRadii]);
+
+  // Phase-dependent visuals fed to the layer. `entering-grow` rewrites radii
+  // (per-marker staggered easing) and holds colors at white; `entering-color`
+  // lets deck's getColor transition carry white → real across all markers.
+  const visuals = useMemo(() => {
+    const { realTargets, parkedTargets, realRadii, realColors } = baseVisuals;
+    const n = realRadii.length;
+    if (phase === "parked") {
+      return { targets: parkedTargets, radii: realRadii, colors: realColors };
+    }
+    if (phase === "idle") {
+      const zero = new Array<number>(n).fill(0);
+      const white: [number, number, number, number][] = realColors.map(
+        (c) => [255, 255, 255, c[3]]
+      );
+      return { targets: realTargets, radii: zero, colors: white };
+    }
+    if (phase === "entering-grow") {
+      const radii: number[] = new Array(n);
+      const colors: [number, number, number, number][] = new Array(n);
+      const total = STAGGER_SPAN + GROW_DURATION;
+      const tCur = entryProgress * total;
+      const N = Math.max(1, n - 1);
+      for (let i = 0; i < n; i++) {
+        const startT = (ranks[i] / N) * STAGGER_SPAN;
+        const local = (tCur - startT) / GROW_DURATION;
+        const p = Math.max(0, Math.min(1, local));
+        radii[i] = realRadii[i] * easeOutCubic(p);
+        const c = realColors[i];
+        colors[i] = [255, 255, 255, c[3]];
+      }
+      return { targets: realTargets, radii, colors };
+    }
+    // 'entering-color' or 'active'
+    return { targets: realTargets, radii: realRadii, colors: realColors };
+  }, [baseVisuals, ranks, phase, entryProgress]);
+
+  // deck.gl attribute transitions per phase:
+  //   entering-grow: everything snaps (we drive radii frame-by-frame, hold
+  //     colors at white, position is already real).
+  //   entering-color: only getColor transitions (white → real, all at once).
+  //   active / parked: normal smooth transitions for layout switches /
+  //     position fly-out.
+  const deckTransitions = useMemo(() => {
+    if (phase === "entering-grow" || phase === "idle") {
+      return {
+        getPosition: { duration: 0 },
+        getSize: { duration: 0 },
+        getColor: { duration: 0 },
+      };
+    }
+    if (phase === "entering-color") {
+      return {
+        getPosition: { duration: 0 },
+        getSize: { duration: 0 },
+        getColor: { duration: COLOR_REVEAL_DURATION, easing: easeOutCubic },
+      };
+    }
+    return {
+      getPosition: { duration: 800, easing: easeOutCubic },
+      getColor: { duration: 500, easing: easeOutCubic },
+      getSize: { duration: 600, easing: easeOutCubic },
+    };
+  }, [phase]);
 
   const deckLayers = useMemo(() => {
     if (!mounted || !iconAtlas) return [];
@@ -819,11 +923,7 @@ export function MapChartView({
         pickable: !isDensity,
         autoHighlight: true,
         highlightColor: [255, 255, 255, 150],
-        transitions: {
-          getPosition: { duration: 800, easing: easeOutCubic },
-          getColor: { duration: 500, easing: easeOutCubic },
-          getSize: { duration: 600, easing: easeOutCubic },
-        },
+        transitions: deckTransitions,
         updateTriggers: {
           getPosition: targets,
           getSize: radii,
@@ -831,7 +931,15 @@ export function MapChartView({
         },
       }),
     ];
-  }, [mounted, iconAtlas, iconMapping, visuals, hexes, isDensity]);
+  }, [
+    mounted,
+    iconAtlas,
+    iconMapping,
+    visuals,
+    hexes,
+    isDensity,
+    deckTransitions,
+  ]);
 
   const deckViews = useMemo(
     () => [new OrthographicView({ id: "ortho", flipY: true })],
