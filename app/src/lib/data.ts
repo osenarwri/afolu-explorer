@@ -11,7 +11,13 @@ export function useDataset(mode: DataMode = "real") {
 
   useEffect(() => {
     let alive = true;
-    const file = mode === "mock" ? "/data/hexes_mock.json" : "/data/hexes.json";
+    // basePath is not applied to fetch() by Next, so prefix it explicitly so
+    // data resolves under the GitHub Pages subpath (/afolu-explorer/).
+    const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+    const file =
+      mode === "mock"
+        ? `${base}/data/hexes_mock.json`
+        : `${base}/data/hexes.json`;
     fetch(file)
       .then((r) => r.json())
       .then((d: Dataset) => {
